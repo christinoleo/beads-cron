@@ -1,0 +1,10 @@
+# Logs and runtime data
+logs/
+data/
+
+# Test directory (local testing only, has its own git repo)
+test/
+
+# Temp files
+/tmp/
+*.tmp

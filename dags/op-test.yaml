@@ -1,0 +1,103 @@
+# op-test.yaml
+# Tests implementation using Chrome MCP
+
+name: op-test
+params:
+  - REPO: ""
+  - ISSUE_JSON: ""
+
+steps:
+  - name: extract-info
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.id'
+    output: ISSUE_ID
+
+  - name: extract-title
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.title'
+    output: ISSUE_TITLE
+
+  - name: get-worktree
+    command: |
+      echo "${REPO}/.worktrees/${ISSUE_ID}"
+    output: WORKTREE_PATH
+
+  - name: verify-worktree
+    command: |
+      if [ ! -d "${WORKTREE_PATH}" ]; then
+        echo "ERROR: Worktree not found at ${WORKTREE_PATH}"
+        exit 1
+      fi
+
+  - name: mark-testing
+    dir: ${REPO}
+    command: |
+      bd label remove ${ISSUE_ID} reviewed 2>/dev/null || true
+      bd label add ${ISSUE_ID} testing
+
+  - name: start-dev-server
+    dir: ${WORKTREE_PATH}
+    command: |
+      # Start dev server in background
+      # Adjust command based on your project (npm, pnpm, yarn, etc.)
+      if [ -f "package.json" ]; then
+        npm run dev > /tmp/dev-server-${ISSUE_ID}.log 2>&1 &
+        echo $! > /tmp/dev-server-${ISSUE_ID}.pid
+        sleep 5  # Wait for server to start
+      fi
+    continueOn:
+      failure: true
+
+  - name: run-claude-test
+    dir: ${WORKTREE_PATH}
+    command: |
+      claude --print "
+      You are testing issue ${ISSUE_ID}: ${ISSUE_TITLE}
+
+      Working directory: ${WORKTREE_PATH}
+      A dev server should be running at http://localhost:3000 (or similar).
+
+      First, understand what was implemented:
+      \`\`\`
+      bd show ${ISSUE_ID}
+      \`\`\`
+
+      Your task:
+      1. Use Chrome MCP to navigate to the running application
+      2. Test the implemented feature manually
+      3. Check for visual issues, broken functionality, console errors
+      4. Run any automated tests: npm test, pytest, etc.
+
+      Available Chrome MCP tools:
+      - navigate_page: Go to URLs
+      - take_snapshot: Get page content
+      - click, fill, hover: Interact with elements
+      - take_screenshot: Visual verification
+      - list_console_messages: Check for errors
+
+      If tests FAIL:
+      - Remove 'testing' label: bd label remove ${ISSUE_ID} testing
+      - Add back 'implementing' label: bd label add ${ISSUE_ID} implementing
+      - Create blocking issue with test failures:
+        bd create --title \"Test failures for ${ISSUE_ID}\" --blocks ${ISSUE_ID} --label test-failure --description \"DESCRIBE WHAT FAILED\"
+      - Stop and exit
+
+      If tests PASS:
+      - Remove 'testing' label: bd label remove ${ISSUE_ID} testing
+      - Add 'tested' label: bd label add ${ISSUE_ID} tested
+      "
+    continueOn:
+      failure: true
+
+  - name: stop-dev-server
+    command: |
+      if [ -f "/tmp/dev-server-${ISSUE_ID}.pid" ]; then
+        kill $(cat /tmp/dev-server-${ISSUE_ID}.pid) 2>/dev/null || true
+        rm /tmp/dev-server-${ISSUE_ID}.pid
+      fi
+    continueOn:
+      failure: true
+
+  - name: log-result
+    command: |
+      echo "[$(date)] Tested ${ISSUE_ID}"

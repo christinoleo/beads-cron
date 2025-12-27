@@ -1,0 +1,231 @@
+# beads-repo-check.yaml
+# Runs all operations for a single repo
+# Uses scripts/process-issues.sh for the heavy lifting
+
+name: beads-repo-check
+params:
+  - REPO: ""
+  # Lint/type/format commands - set per-repo in beads-main.yaml
+  # JS example:     LINT_CMD="npm run lint" TYPE_CMD="npm run typecheck" FORMAT_CMD="npx prettier --write ."
+  # Python example: LINT_CMD="ruff check . --fix" TYPE_CMD="ty check ." FORMAT_CMD="ruff format ."
+  - LINT_CMD: ""
+  - TYPE_CMD: ""
+  - FORMAT_CMD: ""
+
+env:
+  - TMPDIR: /tmp/beads-cron
+  - SCRIPTS: /home/christinoleo/Projects/beads-cron/scripts
+
+steps:
+  - name: setup
+    command: mkdir -p ${TMPDIR}
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 0: CHECK FOR UNBLOCKED ISSUES
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-unblocked
+    command: |
+      cd ${REPO}
+      # Get list of blocked issue IDs
+      BLOCKED=$(bd blocked --json 2>/dev/null | jq -r '.[].id // empty' | tr '\n' ' ')
+
+      # Helper to check if issue is unblocked
+      is_unblocked() { echo "$BLOCKED" | grep -qw "$1" && return 1 || return 0; }
+
+      # Transition issues that became unblocked
+      for ID in $(bd list --label pending-approval --json 2>/dev/null | jq -r '.[].id // empty'); do
+        if is_unblocked "$ID"; then
+          bd label remove "$ID" pending-approval && bd label add "$ID" approved
+          echo "Approved: $ID"
+        fi
+      done
+      for ID in $(bd list --label awaiting-human-review --json 2>/dev/null | jq -r '.[].id // empty'); do
+        if is_unblocked "$ID"; then
+          bd label remove "$ID" awaiting-human-review && bd label add "$ID" human-approved
+          echo "Human approved: $ID"
+        fi
+      done
+      for ID in $(bd list --label blocked --json 2>/dev/null | jq -r '.[].id // empty'); do
+        if is_unblocked "$ID"; then
+          bd label remove "$ID" blocked
+          echo "Unblocked: $ID"
+        fi
+      done
+    continueOn:
+      failure: true
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 0.5: CHECK FOR ANSWERED QUESTIONS (Resume Claude sessions)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-answered-questions
+    command: |
+      cd ${REPO}
+      # Find issues blocked by needs-human-input wisps that are now closed
+      for ISSUE_ID in $(bd list --status in_progress --json 2>/dev/null | jq -r '.[].id // empty'); do
+        # Get session ID for this issue
+        SESSION_ID=$(bd comments "$ISSUE_ID" --json 2>/dev/null | jq -r '.[] | select(.text | startswith("claude-session:")) | .text | sub("claude-session:"; "")' | head -1)
+        [ -z "$SESSION_ID" ] && continue
+
+        # Check if blocked by a needs-human-input issue
+        ISSUE_JSON=$(bd show "$ISSUE_ID" --json 2>/dev/null)
+        BLOCKERS=$(echo "$ISSUE_JSON" | jq -r '.[0].dependencies[]? | select(.dependency_type == "blocks") | .id // empty')
+
+        for BLOCKER in $BLOCKERS; do
+          BLOCKER_JSON=$(bd show "$BLOCKER" --json 2>/dev/null)
+          HAS_LABEL=$(echo "$BLOCKER_JSON" | jq -e '.[0].labels | index("needs-human-input")' 2>/dev/null)
+          BLOCKER_STATUS=$(echo "$BLOCKER_JSON" | jq -r '.[0].status' 2>/dev/null)
+
+          if [ -n "$HAS_LABEL" ] && [ "$BLOCKER_STATUS" = "closed" ]; then
+            # Get the answer from close reason
+            ANSWER=$(echo "$BLOCKER_JSON" | jq -r '.[0].close_reason // "No reason provided"')
+
+            echo "Resuming session $SESSION_ID for issue $ISSUE_ID with answer from $BLOCKER"
+
+            # Resume Claude with the answer
+            claude --resume "$SESSION_ID" --print --dangerously-skip-permissions "
+Human answered your question (from issue $BLOCKER):
+$ANSWER
+
+Continue with the task from where you left off.
+" 2>&1 || echo "Resume completed for $ISSUE_ID"
+
+            # Clean up: remove the dependency since question is answered
+            bd dep remove "$ISSUE_ID" "$BLOCKER" 2>/dev/null || true
+          fi
+        done
+      done
+    continueOn:
+      failure: true
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: PLANNING
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-planning
+    command: |
+      cd ${REPO}
+      bd list --status open --label needs-planning --json > ${TMPDIR}/planning.json 2>/dev/null || echo '[]' > ${TMPDIR}/planning.json
+      echo "Found $(jq length ${TMPDIR}/planning.json) issues needing planning"
+
+  - name: run-planning
+    command: ${SCRIPTS}/process-issues.sh ${REPO} ${TMPDIR}/planning.json planning
+    preconditions:
+      - condition: "`jq length ${TMPDIR}/planning.json`"
+        expected: "re:[1-9]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: IMPLEMENTATION
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-implement
+    command: |
+      cd ${REPO}
+      bd ready --label approved --json > ${TMPDIR}/implement.json 2>/dev/null || echo '[]' > ${TMPDIR}/implement.json
+      echo "Found $(jq length ${TMPDIR}/implement.json) issues ready to implement"
+
+  - name: run-implement
+    command: ${SCRIPTS}/process-issues.sh ${REPO} ${TMPDIR}/implement.json implement
+    preconditions:
+      - condition: "`jq length ${TMPDIR}/implement.json`"
+        expected: "re:[1-9]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: LINT / TYPE / FORMAT
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-lint
+    command: |
+      cd ${REPO}
+      bd list --label to-lint --json > ${TMPDIR}/lint.json 2>/dev/null || echo '[]' > ${TMPDIR}/lint.json
+      echo "Found $(jq length ${TMPDIR}/lint.json) issues needing lint"
+
+  - name: run-lint
+    command: |
+      export LINT_CMD="${LINT_CMD}"
+      export TYPE_CMD="${TYPE_CMD}"
+      export FORMAT_CMD="${FORMAT_CMD}"
+      ${SCRIPTS}/process-issues.sh ${REPO} ${TMPDIR}/lint.json lint
+    preconditions:
+      - condition: "`jq length ${TMPDIR}/lint.json`"
+        expected: "re:[1-9]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: CODE REVIEW
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-review
+    command: |
+      cd ${REPO}
+      bd list --label to-review --json > ${TMPDIR}/review.json 2>/dev/null || echo '[]' > ${TMPDIR}/review.json
+      echo "Found $(jq length ${TMPDIR}/review.json) issues needing review"
+
+  - name: run-review
+    command: ${SCRIPTS}/process-issues.sh ${REPO} ${TMPDIR}/review.json review
+    preconditions:
+      - condition: "`jq length ${TMPDIR}/review.json`"
+        expected: "re:[1-9]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: TESTING
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-test
+    command: |
+      cd ${REPO}
+      bd list --label reviewed --json > ${TMPDIR}/test.json 2>/dev/null || echo '[]' > ${TMPDIR}/test.json
+      echo "Found $(jq length ${TMPDIR}/test.json) issues needing testing"
+
+  - name: run-test
+    command: ${SCRIPTS}/process-issues.sh ${REPO} ${TMPDIR}/test.json test
+    preconditions:
+      - condition: "`jq length ${TMPDIR}/test.json`"
+        expected: "re:[1-9]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: HUMAN REVIEW
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-human-review
+    command: |
+      cd ${REPO}
+      bd list --label tested --json > ${TMPDIR}/human-review.json 2>/dev/null || echo '[]' > ${TMPDIR}/human-review.json
+      echo "Found $(jq length ${TMPDIR}/human-review.json) issues needing human review"
+
+  - name: run-human-review
+    command: ${SCRIPTS}/process-issues.sh ${REPO} ${TMPDIR}/human-review.json human-review
+    preconditions:
+      - condition: "`jq length ${TMPDIR}/human-review.json`"
+        expected: "re:[1-9]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 7: MERGE
+  # ═══════════════════════════════════════════════════════════════════
+  - name: check-merge
+    command: |
+      cd ${REPO}
+      bd list --label human-approved --json > ${TMPDIR}/merge.json 2>/dev/null || echo '[]' > ${TMPDIR}/merge.json
+      echo "Found $(jq length ${TMPDIR}/merge.json) issues approved for merge"
+
+  - name: run-merge
+    command: ${SCRIPTS}/process-issues.sh ${REPO} ${TMPDIR}/merge.json merge
+    preconditions:
+      - condition: "`jq length ${TMPDIR}/merge.json`"
+        expected: "re:[1-9]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  - name: summary
+    command: echo "=== Workflow complete for ${REPO} ==="

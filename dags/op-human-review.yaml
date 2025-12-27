@@ -1,0 +1,101 @@
+# op-human-review.yaml
+# Exposes app via cloudflared for human review
+
+name: op-human-review
+params:
+  - REPO: ""
+  - ISSUE_JSON: ""
+
+steps:
+  - name: extract-info
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.id'
+    output: ISSUE_ID
+
+  - name: extract-title
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.title'
+    output: ISSUE_TITLE
+
+  - name: get-worktree
+    command: |
+      echo "${REPO}/.worktrees/${ISSUE_ID}"
+    output: WORKTREE_PATH
+
+  - name: verify-worktree
+    command: |
+      if [ ! -d "${WORKTREE_PATH}" ]; then
+        echo "ERROR: Worktree not found at ${WORKTREE_PATH}"
+        exit 1
+      fi
+
+  - name: mark-human-review
+    dir: ${REPO}
+    command: |
+      bd label remove ${ISSUE_ID} tested 2>/dev/null || true
+      bd label add ${ISSUE_ID} awaiting-human-review
+
+  - name: start-dev-server
+    dir: ${WORKTREE_PATH}
+    command: |
+      if [ -f "package.json" ]; then
+        npm run dev > /tmp/dev-server-${ISSUE_ID}.log 2>&1 &
+        echo $! > /tmp/dev-server-${ISSUE_ID}.pid
+        sleep 5
+      fi
+    continueOn:
+      failure: true
+
+  - name: start-cloudflared
+    command: |
+      # Start cloudflared tunnel and capture URL
+      cloudflared tunnel --url http://localhost:3000 2>&1 | tee /tmp/cloudflared-${ISSUE_ID}.log &
+      echo $! > /tmp/cloudflared-${ISSUE_ID}.pid
+
+      # Wait for tunnel URL to appear
+      for i in $(seq 1 30); do
+        TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared-${ISSUE_ID}.log | head -1)
+        if [ -n "$TUNNEL_URL" ]; then
+          echo "$TUNNEL_URL"
+          exit 0
+        fi
+        sleep 1
+      done
+
+      echo "ERROR: Could not get tunnel URL"
+      exit 1
+    output: TUNNEL_URL
+    continueOn:
+      failure: true
+
+  - name: create-review-request
+    dir: ${REPO}
+    command: |
+      bd create \
+        --title "Human review needed: ${ISSUE_ID}" \
+        --blocks ${ISSUE_ID} \
+        --label needs-human-review \
+        --description "Please review the implementation at: ${TUNNEL_URL}
+
+      Issue: ${ISSUE_ID} - ${ISSUE_TITLE}
+
+      Instructions:
+      1. Visit the URL above
+      2. Test the implemented feature
+      3. If APPROVED: Close this issue with comment 'approved'
+      4. If CHANGES NEEDED: Close this issue with comment describing what to fix
+
+      The tunnel will remain active until you close this issue."
+    continueOn:
+      failure: true
+
+  # NOTE: This step will block until human closes the blocking issue
+  # In practice, you might want to handle this differently
+  # For now, we just create the blocking issue and exit
+  # The next cron run will skip this issue until human approves
+
+  - name: log-result
+    command: |
+      echo "[$(date)] Human review requested for ${ISSUE_ID} at ${TUNNEL_URL}"
+      echo "Tunnel PID: $(cat /tmp/cloudflared-${ISSUE_ID}.pid 2>/dev/null || echo 'unknown')"
+      echo "Dev server PID: $(cat /tmp/dev-server-${ISSUE_ID}.pid 2>/dev/null || echo 'unknown')"

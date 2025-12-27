@@ -1,0 +1,54 @@
+# beads-main.yaml
+# Main orchestrator - runs every 5 minutes, checks all repos
+
+schedule: "*/5 * * * *"
+maxActiveRuns: 1
+
+env:
+  - MAX_PARALLEL: "3"
+
+steps:
+  # ═══════════════════════════════════════════════════════════════════
+  # REPOS - Add your repos here with their lint/type/format commands
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Test repo (no linting)
+  - name: test-repo
+    call: beads-repo-check
+    params: "REPO=/home/christinoleo/Projects/beads-cron/test"
+
+  # Example: JavaScript/TypeScript project
+  # - name: my-js-project
+  #   call: beads-repo-check
+  #   params: >-
+  #     REPO=/path/to/js-project
+  #     LINT_CMD=npm run lint
+  #     TYPE_CMD=npm run typecheck
+  #     FORMAT_CMD=npx prettier --write .
+
+  # Example: Python project
+  # - name: my-python-project
+  #   call: beads-repo-check
+  #   params: >-
+  #     REPO=/path/to/python-project
+  #     LINT_CMD=ruff check . --fix
+  #     TYPE_CMD=ty check .
+  #     FORMAT_CMD=ruff format .
+
+  # Example: Rust project
+  # - name: my-rust-project
+  #   call: beads-repo-check
+  #   params: >-
+  #     REPO=/path/to/rust-project
+  #     LINT_CMD=cargo clippy --fix --allow-dirty
+  #     TYPE_CMD=cargo check
+  #     FORMAT_CMD=cargo fmt
+
+  # Example: Go project
+  # - name: my-go-project
+  #   call: beads-repo-check
+  #   params: >-
+  #     REPO=/path/to/go-project
+  #     LINT_CMD=golangci-lint run --fix
+  #     TYPE_CMD=go build ./...
+  #     FORMAT_CMD=go fmt ./...

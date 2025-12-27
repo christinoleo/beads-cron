@@ -1,0 +1,80 @@
+# op-check-unblocked.yaml
+# Checks for issues that became unblocked and transitions them
+
+name: op-check-unblocked
+params:
+  - REPO: ""
+
+steps:
+  # Check for issues with pending-approval that are now unblocked (human approved)
+  - name: check-plan-approved
+    dir: ${REPO}
+    command: |
+      # Find issues that have pending-approval AND are now ready (no blockers)
+      bd ready --label pending-approval --json 2>/dev/null || echo '[]'
+    output: APPROVED_PLANS
+
+  - name: transition-approved-plans
+    dir: ${REPO}
+    command: |
+      echo '${APPROVED_PLANS}' | jq -r '.[].id' | while read ISSUE_ID; do
+        if [ -n "$ISSUE_ID" ]; then
+          bd label remove "$ISSUE_ID" pending-approval 2>/dev/null || true
+          bd label add "$ISSUE_ID" approved
+          echo "Transitioned $ISSUE_ID: pending-approval -> approved"
+        fi
+      done
+    preconditions:
+      - condition: "${APPROVED_PLANS}"
+        expected: "re:\\[.+\\]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  # Check for issues with awaiting-human-review that are now unblocked
+  - name: check-human-reviewed
+    dir: ${REPO}
+    command: |
+      bd ready --label awaiting-human-review --json 2>/dev/null || echo '[]'
+    output: HUMAN_REVIEWED
+
+  - name: transition-human-reviewed
+    dir: ${REPO}
+    command: |
+      echo '${HUMAN_REVIEWED}' | jq -r '.[].id' | while read ISSUE_ID; do
+        if [ -n "$ISSUE_ID" ]; then
+          bd label remove "$ISSUE_ID" awaiting-human-review 2>/dev/null || true
+          bd label add "$ISSUE_ID" human-approved
+          echo "Transitioned $ISSUE_ID: awaiting-human-review -> human-approved"
+        fi
+      done
+    preconditions:
+      - condition: "${HUMAN_REVIEWED}"
+        expected: "re:\\[.+\\]"
+    continueOn:
+      skipped: true
+      failure: true
+
+  # Check for issues that were blocked (implementing) and are now unblocked
+  - name: check-unblocked-implementing
+    dir: ${REPO}
+    command: |
+      bd ready --label blocked --json 2>/dev/null || echo '[]'
+    output: UNBLOCKED
+
+  - name: transition-unblocked
+    dir: ${REPO}
+    command: |
+      echo '${UNBLOCKED}' | jq -r '.[].id' | while read ISSUE_ID; do
+        if [ -n "$ISSUE_ID" ]; then
+          bd label remove "$ISSUE_ID" blocked 2>/dev/null || true
+          # Keep implementing label - it will be picked up next cycle
+          echo "Unblocked $ISSUE_ID"
+        fi
+      done
+    preconditions:
+      - condition: "${UNBLOCKED}"
+        expected: "re:\\[.+\\]"
+    continueOn:
+      skipped: true
+      failure: true

@@ -1,0 +1,61 @@
+# op-plan.yaml
+# Plans an issue - creates sub-issues and asks for human approval
+
+name: op-plan
+params:
+  - REPO: ""
+  - ISSUE_JSON: ""
+
+steps:
+  - name: extract-info
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.id'
+    output: ISSUE_ID
+
+  - name: extract-title
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.title'
+    output: ISSUE_TITLE
+
+  - name: mark-planning
+    dir: ${REPO}
+    command: |
+      bd label remove ${ISSUE_ID} needs-planning 2>/dev/null || true
+      bd label add ${ISSUE_ID} planning
+
+  - name: run-claude-planning
+    dir: ${REPO}
+    command: |
+      claude --print "
+      You are planning issue ${ISSUE_ID}: ${ISSUE_TITLE}
+
+      First, read the issue details:
+      \`\`\`
+      bd show ${ISSUE_ID}
+      \`\`\`
+
+      Your task:
+      1. Analyze the issue and understand what needs to be done
+      2. Break it down into implementation steps
+      3. Create sub-issues for each step using:
+         bd create --title \"Step N: description\" --parent ${ISSUE_ID}
+
+      If you have BLOCKING questions that prevent planning:
+      - Create a blocking issue:
+        bd create --title \"Question: your question here\" --blocks ${ISSUE_ID} --label needs-human-input
+      - Remove the 'planning' label: bd label remove ${ISSUE_ID} planning
+      - Add 'blocked' label: bd label add ${ISSUE_ID} blocked
+      - Stop and exit
+
+      If you can complete the plan:
+      - Remove 'planning' label: bd label remove ${ISSUE_ID} planning
+      - Add 'pending-approval' label: bd label add ${ISSUE_ID} pending-approval
+      - Create a blocking issue for approval:
+        bd create --title \"Approve plan for ${ISSUE_ID}\" --blocks ${ISSUE_ID} --label needs-human-approval --description \"Please review the plan and close this issue to approve, or add comments with feedback.\"
+      "
+    continueOn:
+      failure: true
+
+  - name: log-result
+    command: |
+      echo "[$(date)] Planned ${ISSUE_ID} in ${REPO}"

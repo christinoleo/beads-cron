@@ -1,0 +1,77 @@
+# op-implement.yaml
+# Implements an issue in a worktree
+
+name: op-implement
+params:
+  - REPO: ""
+  - ISSUE_JSON: ""
+
+steps:
+  - name: extract-info
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.id'
+    output: ISSUE_ID
+
+  - name: extract-title
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.title'
+    output: ISSUE_TITLE
+
+  - name: setup-worktree
+    dir: ${REPO}
+    command: |
+      WORKTREE_PATH="${REPO}/.worktrees/${ISSUE_ID}"
+      BRANCH_NAME="work/${ISSUE_ID}"
+
+      # Create worktree if doesn't exist
+      if [ ! -d "$WORKTREE_PATH" ]; then
+        git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" 2>/dev/null || \
+        git worktree add "$WORKTREE_PATH" "$BRANCH_NAME" 2>/dev/null || \
+        echo "Worktree already exists or error"
+      fi
+
+      echo "$WORKTREE_PATH"
+    output: WORKTREE_PATH
+
+  - name: mark-implementing
+    dir: ${REPO}
+    command: |
+      bd label remove ${ISSUE_ID} approved 2>/dev/null || true
+      bd label add ${ISSUE_ID} implementing
+      bd update ${ISSUE_ID} --status in_progress 2>/dev/null || true
+
+  - name: run-claude-implement
+    dir: ${WORKTREE_PATH}
+    command: |
+      claude --print "
+      You are implementing issue ${ISSUE_ID}: ${ISSUE_TITLE}
+
+      You are working in a git worktree at: ${WORKTREE_PATH}
+
+      First, read the issue details:
+      \`\`\`
+      bd show ${ISSUE_ID}
+      \`\`\`
+
+      Your task:
+      1. Implement the feature/fix described in the issue
+      2. Write tests if appropriate
+      3. Commit your changes with meaningful commit messages
+
+      If you encounter BLOCKING problems:
+      - Create a blocking issue:
+        bd create --title \"Blocked: description\" --blocks ${ISSUE_ID} --label needs-human-input
+      - Keep the 'implementing' label (you'll resume later)
+      - Stop and exit
+
+      When implementation is complete:
+      - Commit all changes
+      - Remove 'implementing' label: bd label remove ${ISSUE_ID} implementing
+      - Add 'to-review' label: bd label add ${ISSUE_ID} to-review
+      "
+    continueOn:
+      failure: true
+
+  - name: log-result
+    command: |
+      echo "[$(date)] Implemented ${ISSUE_ID} in ${WORKTREE_PATH}"

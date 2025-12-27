@@ -1,0 +1,81 @@
+# op-review.yaml
+# Reviews implementation like Linus Torvalds
+
+name: op-review
+params:
+  - REPO: ""
+  - ISSUE_JSON: ""
+
+steps:
+  - name: extract-info
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.id'
+    output: ISSUE_ID
+
+  - name: extract-title
+    command: |
+      echo '${ISSUE_JSON}' | jq -r '.title'
+    output: ISSUE_TITLE
+
+  - name: get-worktree
+    command: |
+      echo "${REPO}/.worktrees/${ISSUE_ID}"
+    output: WORKTREE_PATH
+
+  - name: verify-worktree
+    command: |
+      if [ ! -d "${WORKTREE_PATH}" ]; then
+        echo "ERROR: Worktree not found at ${WORKTREE_PATH}"
+        exit 1
+      fi
+
+  - name: mark-reviewing
+    dir: ${REPO}
+    command: |
+      bd label remove ${ISSUE_ID} to-review 2>/dev/null || true
+      bd label add ${ISSUE_ID} reviewing
+
+  - name: run-claude-review
+    dir: ${WORKTREE_PATH}
+    command: |
+      claude --print "
+      You are reviewing issue ${ISSUE_ID}: ${ISSUE_TITLE}
+
+      **IMPORTANT: Review this code like Linus Torvalds would.**
+      Be direct, critical, and technical. Don't be nice - be correct.
+
+      Working directory: ${WORKTREE_PATH}
+
+      First, understand what was implemented:
+      \`\`\`
+      bd show ${ISSUE_ID}
+      git log --oneline -10
+      git diff main...HEAD
+      \`\`\`
+
+      Review checklist:
+      1. Does it actually solve the issue?
+      2. Code quality and style - is it clean or garbage?
+      3. Are edge cases handled or ignored?
+      4. Any obvious bugs or logic errors?
+      5. Security issues? SQL injection, XSS, etc.?
+      6. Tests exist and actually test something useful?
+      7. Over-engineered? Under-engineered?
+
+      If you find issues (be harsh):
+      - Remove 'reviewing' label: bd label remove ${ISSUE_ID} reviewing
+      - Add back 'implementing' label: bd label add ${ISSUE_ID} implementing
+      - Create a blocking issue with your feedback:
+        bd create --title \"Review feedback for ${ISSUE_ID}\" --blocks ${ISSUE_ID} --label review-feedback --description \"YOUR HARSH FEEDBACK HERE\"
+      - Stop and exit
+
+      If the code is acceptable (rare):
+      - Remove 'reviewing' label: bd label remove ${ISSUE_ID} reviewing
+      - Add 'reviewed' label: bd label add ${ISSUE_ID} reviewed
+      "
+    continueOn:
+      failure: true
+
+  - name: log-result
+    command: |
+      echo "[$(date)] Reviewed ${ISSUE_ID}"

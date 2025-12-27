@@ -1,0 +1,12 @@
+name: test-dir
+
+params:
+  - REPO: /home/christinoleo/Projects/beads-cron/test
+
+steps:
+  - name: show-dir
+    command: |
+      cd ${REPO}
+      echo "PWD: $(pwd)"
+      echo "REPO: ${REPO}"
+      bd list --status open --label needs-planning --json

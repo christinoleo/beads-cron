@@ -1,0 +1,37 @@
+# test-check.yaml
+# Simple test to verify we can find issues
+
+name: test-check
+
+env:
+  - REPO: /home/christinoleo/Projects/beads-cron/test
+  - TMPDIR: /tmp/beads-cron
+
+steps:
+  - name: setup
+    command: mkdir -p ${TMPDIR}
+
+  - name: check-needs-planning
+    dir: ${REPO}
+    command: |
+      bd list --status open --label needs-planning --json > ${TMPDIR}/planning.json 2>/dev/null || echo '[]' > ${TMPDIR}/planning.json
+      cat ${TMPDIR}/planning.json
+
+  - name: show-count
+    command: |
+      COUNT=$(jq length ${TMPDIR}/planning.json)
+      echo "Found $COUNT issues"
+      if [ "$COUNT" -gt 0 ]; then
+        echo "Issues:"
+        jq -r '.[] | "\(.id): \(.title)"' ${TMPDIR}/planning.json
+      fi
+
+  - name: extract-first
+    command: |
+      FIRST_ID=$(jq -r '.[0].id // empty' ${TMPDIR}/planning.json)
+      if [ -n "$FIRST_ID" ]; then
+        echo "First issue: $FIRST_ID"
+        echo "$FIRST_ID" > ${TMPDIR}/first_id.txt
+      else
+        echo "No issues found"
+      fi
